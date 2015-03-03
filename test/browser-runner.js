@@ -5,11 +5,13 @@ var fs = require('fs');
 var httpServer = require('http-server');
 var nodeunit = require('nodeunit');
 var optimist = require('./runner-options');
-var portfinder = require('portfinder');
 var Q = require('q');
 var querystring = require('querystring');
 var runnerDisplay = require('./browser-display');
-var seleniumStandalone = require('selenium-standalone');
+var portfinder = Q.denodeify(require('portfinder').getPort);
+var getSaucelabsBrowsers = Q.denodeify(require('get-saucelabs-browsers'));
+var installSelenium = Q.denodeify(require('selenium-standalone').install);
+var startSelenium = Q.denodeify(require('selenium-standalone').start);
 var wd = require('wd');
 
 var browser;
@@ -41,26 +43,38 @@ function getFnBody(fn) {
   return src.slice(src.indexOf('{') + 1, src.lastIndexOf('}'));
 }
 
+function getLatestChromeVersion() {
+  return getSaucelabsBrowsers(['chrome/latest']).then(function (configs) {
+    return configs[0].version;
+  });
+}
+
 function run() {
   var passed = false;
-  browser.init({
-    browserName: 'chrome',
-    name: 'Travis tmpvar/jsdom #' + process.env['TRAVIS_JOB_NUMBER'],
-    'tunnel-identifier': process.env['TRAVIS_JOB_NUMBER'],
-    build: process.env['TRAVIS_BUILD_NUMBER'],
-    tags: ['tmpvar/jsdom', 'CI']
-  }).then(function () {
+
+  getLatestChromeVersion()
+    .then(function (latestChromeVersion) {
+      return browser.init({
+        browserName: 'chrome',
+        version: latestChromeVersion,
+        name: 'Travis tmpvar/jsdom #' + process.env['TRAVIS_JOB_NUMBER'],
+        'tunnel-identifier': process.env['TRAVIS_JOB_NUMBER'],
+        build: process.env['TRAVIS_BUILD_NUMBER'],
+        tags: ['tmpvar/jsdom', 'CI']
+      });
+    })
+    .then(function () {
       return browser.setAsyncScriptTimeout(5000);
-    }).
-    then(function () {
+    })
+    .then(function () {
       return browser.get([
           'http://localhost:',
           httpPort,
           '/test?',
           querystring.stringify(argv)
         ].join(''));
-    }).
-    then(function (result) {
+    })
+    .then(function (result) {
       function browserPoll() {
         var events = window._browserRunner.events;
 
@@ -124,14 +138,14 @@ function run() {
 
       poll();
       return deferred.promise;
-    }).
-    finally(function () {
+    })
+    .finally(function () {
       return browser.quit();
-    }).
-    finally(function () {
+    })
+    .finally(function () {
       process.exit(passed ? 0 : 1);
-    }).
-    done();
+    })
+    .done();
 }
 
 // browserify and run the tests
@@ -140,18 +154,18 @@ browserify('./test/worker.js').
   pipe(fs.createWriteStream('./test/worker-bundle.js')).
   on('finish', function () {
     Q.fcall(function () {
-        return httpPort || Q.ninvoke(portfinder, 'getPort');
-      }).
-      then(function (port) {
+      return httpPort || portfinder();
+    })
+      .then(function (port) {
         httpPort = port;
 
         // start web server
         console.log('starting http server on port', httpPort);
         httpServer.createServer().listen(httpPort);
 
-        return wdPort || Q.ninvoke(portfinder, 'getPort');
-      }).
-      then(function (port) {
+        return wdPort || portfinder();
+      })
+      .then(function (port) {
         wdPort = port;
 
         var opts = {
@@ -191,40 +205,46 @@ browserify('./test/worker.js').
         }
 
         if (process.env['TEST_SUITE'] !== 'browser') {
-          // start selenium
-          console.log('starting selenium server on port', wdPort);
-          var selenium = seleniumStandalone;
-          var wdServer = selenium({
-            stdio: 'pipe'
-          }, ['-port', wdPort]);
+          console.log('installing selenium');
 
-          // time out after a default of 30 seconds
-          var h = setTimeout(function () {
-            console.log('Timed out waiting for selenium server to start');
-            wdServer.kill();
-            process.exit(1);
-          }, argv.wdTimeout || 30 * 1000);
+          return installSelenium()
+            .then(function () {
+              console.log('starting selenium server on port', wdPort);
 
-          // Wait for selenium server to start.
-          wdServer.stdout.on('data', function (output) {
-            if (output.toString().indexOf('Started org.openqa.jetty.jetty.Server') >= 0) {
-              clearTimeout(h);
-              run();
-            }
-          });
-          wdServer.stderr.on('data', function (output) {
-            if (output.toString().indexOf('Started org.openqa.jetty.jetty.Server') >= 0) {
-              clearTimeout(h);
-              run();
-            }
-          });
+              return startSelenium({
+                spawnOptions: { stdio: 'pipe' },
+                seleniumArgs: ['-port', wdPort]
+              });
+            })
+            .then(function (wdServer) {
+              // time out after a default of 30 seconds
+              var h = setTimeout(function () {
+                console.log('Timed out waiting for selenium server to start');
+                wdServer.kill();
+                process.exit(1);
+              }, argv.wdTimeout || 30 * 1000);
+
+              // Wait for selenium server to start.
+              wdServer.stdout.on('data', function (output) {
+                if (output.toString().indexOf('Started org.openqa.jetty.jetty.Server') >= 0) {
+                  clearTimeout(h);
+                  run();
+                }
+              });
+              wdServer.stderr.on('data', function (output) {
+                if (output.toString().indexOf('Started org.openqa.jetty.jetty.Server') >= 0) {
+                  clearTimeout(h);
+                  run();
+                }
+              });
+            });
         } else {
           run();
         }
-      }).
-      catch(function (err) {
+      })
+      .catch(function (err) {
         console.error('Failed to run browser tests', err);
         process.exit(1);
-      }).
-      done();
+      })
+      .done();
   });
