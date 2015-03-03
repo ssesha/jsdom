@@ -49,6 +49,15 @@ function getLatestChromeVersion() {
   });
 }
 
+function startServer() {
+  var server = httpServer.createServer();
+  
+  return Q.ninvoke(server, 'listen', httpPort || 0)
+    .then(function () {
+      return server.server.address().port;
+    });
+}
+
 function run() {
   var passed = false;
 
@@ -153,16 +162,12 @@ browserify('./test/worker.js').
   bundle().
   pipe(fs.createWriteStream('./test/worker-bundle.js')).
   on('finish', function () {
-    Q.fcall(function () {
-      return httpPort || portfinder();
-    })
+    // start web server
+    console.log('starting http server');
+    startServer()
       .then(function (port) {
         httpPort = port;
-
-        // start web server
-        console.log('starting http server on port', httpPort);
-        httpServer.createServer().listen(httpPort);
-
+        console.log('started server on port', httpPort);
         return wdPort || portfinder();
       })
       .then(function (port) {
